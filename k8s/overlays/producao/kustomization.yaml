@@ -5,14 +5,14 @@ resources:
 # Imagens versionadas e imutáveis vindas do registry (o CI sobrescreve a tag pelo sha/versão).
 images:
   - name: loja-veloz/gateway
-    newName: ghcr.io/SEU_USUARIO/loja-veloz-gateway
+    newName: ghcr.io/arthurmends777/loja-veloz-gateway
     newTag: "1.0.0"
   - name: loja-veloz/pedidos
-    newName: ghcr.io/SEU_USUARIO/loja-veloz-pedidos
+    newName: ghcr.io/arthurmends777/loja-veloz-pedidos
     newTag: "1.0.0"
   - name: loja-veloz/pagamentos
-    newName: ghcr.io/SEU_USUARIO/loja-veloz-pagamentos
+    newName: ghcr.io/arthurmends777/loja-veloz-pagamentos
     newTag: "1.0.0"
   - name: loja-veloz/estoque
-    newName: ghcr.io/SEU_USUARIO/loja-veloz-estoque
+    newName: ghcr.io/arthurmends777/loja-veloz-estoque
     newTag: "1.0.0"
