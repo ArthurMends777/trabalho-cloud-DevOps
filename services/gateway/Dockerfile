@@ -12,6 +12,11 @@ ENV NODE_ENV=production \
     SERVICE_NAME=gateway \
     PORT=8080
 WORKDIR /app
+# Superfície de ataque mínima: só o runtime "node" é necessário aqui. Removemos npm, corepack e yarn
+# herdados da imagem base (o Trivy apontou CVEs HIGH no npm embutido). O CMD e o HEALTHCHECK usam apenas "node".
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+           /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-*
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./
 COPY --chown=node:node src ./src
