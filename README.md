@@ -4,7 +4,7 @@ Proposta Cloud DevOps fim a fim para a plataforma de pedidos da **Loja Veloz**: 
 com Docker Compose, imagens enxutas e versionadas, Kubernetes com práticas de produção, pipeline de CI/CD,
 observabilidade (métricas, logs e traces) e infraestrutura reproduzível com Terraform.
 
-> 🎥 **Vídeo pitch (YouTube):** _cole aqui o link_
+> 🎥 **Vídeo pitch (YouTube):**
 
 ---
 
