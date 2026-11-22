@@ -1,0 +1,216 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Princípio do menor privilégio: o token começa somente leitura
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  K8S_NAMESPACE: loja-veloz
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1) Lint + testes + auditoria de dependências (um job por serviço)
+  # ------------------------------------------------------------------
+  test:
+    name: Lint e testes (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, pedidos, pagamentos, estoque]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - name: "Auditoria de dependências (gate - vulnerabilidades críticas)"
+        run: npm audit --omit=dev --audit-level=critical
+
+  # ------------------------------------------------------------------
+  # 2) Validação de infraestrutura como código e configuração
+  # ------------------------------------------------------------------
+  validate:
+    name: Validar Compose, Kubernetes e Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker Compose (sintaxe e variáveis)
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+      - name: Kubernetes (kustomize + kubeconform)
+        run: |
+          kubectl kustomize k8s/overlays/producao \
+            | docker run -i --rm ghcr.io/yannh/kubeconform:v0.6.7 \
+                -strict -summary -kubernetes-version 1.31.0 -
+
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform (fmt + validate)
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  # ------------------------------------------------------------------
+  # 3) Build da imagem, scan de vulnerabilidades e publicação no registry
+  # ------------------------------------------------------------------
+  build:
+    name: Build, scan e push (${{ matrix.service }})
+    needs: [test, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, pedidos, pagamentos, estoque]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadados / tags da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.service }}
+          tags: |
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (carrega localmente para escanear)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          load: true
+          tags: loja-veloz/${{ matrix.service }}:scan
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan de vulnerabilidades (Trivy) - falha em CRITICAL/HIGH com correção disponível
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: loja-veloz/${{ matrix.service }}:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Login no registry (somente fora de Pull Requests)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push da imagem versionada
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.service }}
+
+  # ------------------------------------------------------------------
+  # 4) Deploy no Kubernetes (rolling update) com aprovação e rollback
+  # ------------------------------------------------------------------
+  deploy:
+    name: Deploy em produção
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production        # configure "Required reviewers" no GitHub = gate de aprovação manual
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+
+      - name: Configurar acesso ao cluster
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl version --client
+
+      - name: Namespace e Secret (credenciais vêm dos GitHub Secrets, nunca do Git)
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          PEDIDOS_DB_PASSWORD: ${{ secrets.PEDIDOS_DB_PASSWORD }}
+          ESTOQUE_DB_PASSWORD: ${{ secrets.ESTOQUE_DB_PASSWORD }}
+        run: |
+          kubectl apply -f k8s/base/00-namespace.yaml
+          kubectl -n "$K8S_NAMESPACE" create secret generic loja-veloz-secrets \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=PEDIDOS_DB_PASSWORD="$PEDIDOS_DB_PASSWORD" \
+            --from-literal=ESTOQUE_DB_PASSWORD="$ESTOQUE_DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Gerar overlay com as imagens deste commit
+        run: |
+          REPO="${GITHUB_REPOSITORY,,}"
+          TAG="sha-${GITHUB_SHA::7}"
+          mkdir -p k8s/overlays/ci
+          {
+            echo "apiVersion: kustomize.config.k8s.io/v1beta1"
+            echo "kind: Kustomization"
+            echo "resources:"
+            echo "  - ../../base"
+            echo "images:"
+            for s in gateway pedidos pagamentos estoque; do
+              echo "  - name: loja-veloz/$s"
+              echo "    newName: ${REGISTRY}/${REPO}-$s"
+              echo "    newTag: $TAG"
+            done
+          } > k8s/overlays/ci/kustomization.yaml
+          cat k8s/overlays/ci/kustomization.yaml
+
+      - name: Aplicar manifests
+        run: kubectl apply -k k8s/overlays/ci
+
+      - name: Aguardar rollout (gate de readiness)
+        run: |
+          for d in postgres; do kubectl -n "$K8S_NAMESPACE" rollout status statefulset/$d --timeout=300s; done
+          for d in estoque pagamentos pedidos gateway; do
+            kubectl -n "$K8S_NAMESPACE" rollout status deployment/$d --timeout=180s
+          done
+
+      - name: Rollback automático em caso de falha
+        if: failure()
+        run: |
+          for d in gateway pedidos pagamentos estoque; do
+            kubectl -n "$K8S_NAMESPACE" rollout undo deployment/$d || true
+          done

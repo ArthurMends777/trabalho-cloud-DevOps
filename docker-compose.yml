@@ -1,0 +1,137 @@
+# Ambiente local completo, reproduzível, com um único comando:
+#   cp .env.example .env && docker compose up -d --build
+name: loja-veloz
+
+x-servico-node: &servico-node
+  restart: unless-stopped
+  environment: &env-comum
+    NODE_ENV: production
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318   # tracing distribuído -> Jaeger
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true            # filesystem somente leitura
+  tmpfs: [/tmp]
+
+services:
+  # ---------------- Aplicação ----------------
+  gateway:
+    <<: *servico-node
+    build: ./services/gateway
+    image: loja-veloz/gateway:${TAG:-dev}
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    environment:
+      <<: *env-comum
+      SERVICE_NAME: gateway
+      PEDIDOS_URL: http://pedidos:3001
+      ESTOQUE_URL: http://estoque:3003
+    depends_on:
+      pedidos: { condition: service_healthy }
+      estoque: { condition: service_healthy }
+    networks: [publica, backend]
+
+  pedidos:
+    <<: *servico-node
+    build: ./services/pedidos
+    image: loja-veloz/pedidos:${TAG:-dev}
+    environment:
+      <<: *env-comum
+      SERVICE_NAME: pedidos
+      ESTOQUE_URL: http://estoque:3003
+      PAGAMENTOS_URL: http://pagamentos:3002
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-lojaveloz}
+      PGUSER: pedidos_svc
+      PGPASSWORD: ${PEDIDOS_DB_PASSWORD:?defina PEDIDOS_DB_PASSWORD no .env}
+    depends_on:
+      postgres: { condition: service_healthy }
+      estoque: { condition: service_healthy }
+      pagamentos: { condition: service_healthy }
+    networks: [backend, db]
+
+  pagamentos:
+    <<: *servico-node
+    build: ./services/pagamentos
+    image: loja-veloz/pagamentos:${TAG:-dev}
+    environment:
+      <<: *env-comum
+      SERVICE_NAME: pagamentos
+      PAGAMENTO_LIMITE: ${PAGAMENTO_LIMITE:-10000}
+      PAGAMENTO_LATENCIA_MS: ${PAGAMENTO_LATENCIA_MS:-150}
+    networks: [backend]
+
+  estoque:
+    <<: *servico-node
+    build: ./services/estoque
+    image: loja-veloz/estoque:${TAG:-dev}
+    environment:
+      <<: *env-comum
+      SERVICE_NAME: estoque
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-lojaveloz}
+      PGUSER: estoque_svc
+      PGPASSWORD: ${ESTOQUE_DB_PASSWORD:?defina ESTOQUE_DB_PASSWORD no .env}
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend, db]
+
+  # ---------------- Banco de dados ----------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lojaveloz}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      PEDIDOS_DB_PASSWORD: ${PEDIDOS_DB_PASSWORD}
+      ESTOQUE_DB_PASSWORD: ${ESTOQUE_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-lojaveloz}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [db]   # rede interna: o banco NÃO é acessível de fora do Compose
+
+  # ---------------- Observabilidade ----------------
+  jaeger:   # traces (OTLP :4318) + UI
+    image: jaegertracing/jaeger:2.18.0
+    restart: unless-stopped
+    ports: ["16686:16686"]
+    networks: [backend, publica]
+
+  prometheus:   # métricas
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    networks: [backend, publica]
+
+  grafana:   # dashboards
+    image: grafana/grafana:12.0.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    networks: [backend, publica]
+
+networks:
+  publica:            # exposta ao host (gateway + UIs de observabilidade)
+  backend:            # comunicação entre serviços
+  db:
+    internal: true    # sem acesso à internet nem ao host
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:

@@ -1,0 +1,26 @@
+# Entrada pública: apenas o API Gateway é exposto. Requer um Ingress Controller (ex.: ingress-nginx).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: loja-veloz
+  annotations:
+    # TLS automático com cert-manager (opcional):
+    # cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+spec:
+  ingressClassName: nginx
+  # tls:
+  #   - hosts: [api.loja-veloz.example.com]
+  #     secretName: loja-veloz-tls
+  rules:
+    - host: api.loja-veloz.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  name: http

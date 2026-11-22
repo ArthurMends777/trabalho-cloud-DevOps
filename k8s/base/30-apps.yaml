@@ -1,0 +1,439 @@
+# Deployments + Services dos microsserviços.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  # "replicas" é omitido de propósito: quem controla o número de réplicas é o HPA.
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate          # estratégia de deploy escolhida (ver README)
+    rollingUpdate:
+      maxSurge: 1                # sobe 1 pod novo antes de derrubar um antigo
+      maxUnavailable: 0          # nunca reduz a capacidade durante o deploy
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway
+        app.kubernetes.io/part-of: loja-veloz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000          # usuário "node" da imagem
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:   # espalha as réplicas entre nós
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      containers:
+        - name: gateway
+          image: loja-veloz/gateway      # tag/registry definidos pelo overlay (kustomize "images")
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: loja-veloz-config
+          env:
+            - name: SERVICE_NAME
+              value: gateway
+            - name: PORT
+              value: "8080"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          startupProbe:              # dá tempo para o app iniciar antes das demais probes
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:            # só recebe tráfego se estiver pronto (ex.: banco OK)
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:             # reinicia o contêiner se travar
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:                 # aguarda a remoção do endpoint antes de encerrar (sem erros 502)
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pedidos
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: pedidos
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  # "replicas" é omitido de propósito: quem controla o número de réplicas é o HPA.
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate          # estratégia de deploy escolhida (ver README)
+    rollingUpdate:
+      maxSurge: 1                # sobe 1 pod novo antes de derrubar um antigo
+      maxUnavailable: 0          # nunca reduz a capacidade durante o deploy
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pedidos
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pedidos
+        app.kubernetes.io/part-of: loja-veloz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3001"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000          # usuário "node" da imagem
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:   # espalha as réplicas entre nós
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pedidos
+      containers:
+        - name: pedidos
+          image: loja-veloz/pedidos      # tag/registry definidos pelo overlay (kustomize "images")
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: loja-veloz-config
+          env:
+            - name: SERVICE_NAME
+              value: pedidos
+            - name: PORT
+              value: "3001"
+            - name: PGUSER
+              value: pedidos_svc
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loja-veloz-secrets
+                  key: PEDIDOS_DB_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          startupProbe:              # dá tempo para o app iniciar antes das demais probes
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:            # só recebe tráfego se estiver pronto (ex.: banco OK)
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:             # reinicia o contêiner se travar
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:                 # aguarda a remoção do endpoint antes de encerrar (sem erros 502)
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pedidos
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: pedidos
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pedidos
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pagamentos
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: pagamentos
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  # "replicas" é omitido de propósito: quem controla o número de réplicas é o HPA.
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate          # estratégia de deploy escolhida (ver README)
+    rollingUpdate:
+      maxSurge: 1                # sobe 1 pod novo antes de derrubar um antigo
+      maxUnavailable: 0          # nunca reduz a capacidade durante o deploy
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pagamentos
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pagamentos
+        app.kubernetes.io/part-of: loja-veloz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3002"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000          # usuário "node" da imagem
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:   # espalha as réplicas entre nós
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pagamentos
+      containers:
+        - name: pagamentos
+          image: loja-veloz/pagamentos      # tag/registry definidos pelo overlay (kustomize "images")
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3002
+          envFrom:
+            - configMapRef:
+                name: loja-veloz-config
+          env:
+            - name: SERVICE_NAME
+              value: pagamentos
+            - name: PORT
+              value: "3002"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          startupProbe:              # dá tempo para o app iniciar antes das demais probes
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:            # só recebe tráfego se estiver pronto (ex.: banco OK)
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:             # reinicia o contêiner se travar
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:                 # aguarda a remoção do endpoint antes de encerrar (sem erros 502)
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pagamentos
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: pagamentos
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pagamentos
+  ports:
+    - name: http
+      port: 3002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: estoque
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: estoque
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  # "replicas" é omitido de propósito: quem controla o número de réplicas é o HPA.
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate          # estratégia de deploy escolhida (ver README)
+    rollingUpdate:
+      maxSurge: 1                # sobe 1 pod novo antes de derrubar um antigo
+      maxUnavailable: 0          # nunca reduz a capacidade durante o deploy
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: estoque
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: estoque
+        app.kubernetes.io/part-of: loja-veloz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3003"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000          # usuário "node" da imagem
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:   # espalha as réplicas entre nós
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: estoque
+      containers:
+        - name: estoque
+          image: loja-veloz/estoque      # tag/registry definidos pelo overlay (kustomize "images")
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3003
+          envFrom:
+            - configMapRef:
+                name: loja-veloz-config
+          env:
+            - name: SERVICE_NAME
+              value: estoque
+            - name: PORT
+              value: "3003"
+            - name: PGUSER
+              value: estoque_svc
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loja-veloz-secrets
+                  key: ESTOQUE_DB_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          startupProbe:              # dá tempo para o app iniciar antes das demais probes
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:            # só recebe tráfego se estiver pronto (ex.: banco OK)
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:             # reinicia o contêiner se travar
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:                 # aguarda a remoção do endpoint antes de encerrar (sem erros 502)
+              exec: { command: ["sleep", "5"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: estoque
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: estoque
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: estoque
+  ports:
+    - name: http
+      port: 3003
+      targetPort: http

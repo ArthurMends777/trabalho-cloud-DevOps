@@ -1,0 +1,21 @@
+# Raspagem das métricas pelo Prometheus Operator (kube-prometheus-stack).
+# Instalação do stack:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack -n observabilidade
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: loja-veloz
+  namespace: observabilidade
+  labels:
+    release: kube-prometheus-stack     # deve casar com o seletor do Prometheus instalado
+spec:
+  namespaceSelector:
+    matchNames: [loja-veloz]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: loja-veloz
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

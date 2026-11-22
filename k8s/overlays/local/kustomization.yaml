@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# Para testar em kind/minikube com imagens construídas localmente (loja-veloz/<svc>:dev).
+images:
+  - name: loja-veloz/gateway
+    newTag: dev
+  - name: loja-veloz/pedidos
+    newTag: dev
+  - name: loja-veloz/pagamentos
+    newTag: dev
+  - name: loja-veloz/estoque
+    newTag: dev

@@ -1,0 +1,95 @@
+# PostgreSQL de uso didático (1 réplica + PVC). Em produção real prefira um banco gerenciado
+# (RDS/Cloud SQL) ou um operador (CloudNativePG) com backup e alta disponibilidade.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  clusterIP: None            # headless (StatefulSet)
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: loja-veloz
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: loja-veloz
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: loja-veloz
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70            # usuário "postgres" da imagem alpine
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_DB
+              valueFrom: { configMapKeyRef: { name: loja-veloz-config, key: PGDATABASE } }
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: loja-veloz-secrets, key: POSTGRES_PASSWORD } }
+            - name: PEDIDOS_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: loja-veloz-secrets, key: PEDIDOS_DB_PASSWORD } }
+            - name: ESTOQUE_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: loja-veloz-secrets, key: ESTOQUE_DB_PASSWORD } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "lojaveloz"] }
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "lojaveloz"] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

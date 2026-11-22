@@ -1,0 +1,149 @@
+# NetworkPolicies: "default deny" + liberações mínimas (zero trust entre serviços).
+# Exige um CNI com suporte (Calico, Cilium...). No kind padrão (kindnet) elas não são aplicadas.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: loja-veloz
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-e-observabilidade
+  namespace: loja-veloz
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:   # DNS
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:   # envio de traces (OTLP HTTP) ao Jaeger
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observabilidade }
+      ports:
+        - { protocol: TCP, port: 4318 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/part-of: loja-veloz }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observabilidade }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 3001 }
+        - { protocol: TCP, port: 3002 }
+        - { protocol: TCP, port: 3003 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: gateway }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:   # somente o Ingress Controller
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: pedidos } }
+      ports: [{ protocol: TCP, port: 3001 }]
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: estoque } }
+      ports: [{ protocol: TCP, port: 3003 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pedidos
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pedidos }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      ports: [{ protocol: TCP, port: 3001 }]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: estoque } }
+      ports: [{ protocol: TCP, port: 3003 }]
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: pagamentos } }
+      ports: [{ protocol: TCP, port: 3002 }]
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: postgres } }
+      ports: [{ protocol: TCP, port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: estoque
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: estoque }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: pedidos } }
+      ports: [{ protocol: TCP, port: 3003 }]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: postgres } }
+      ports: [{ protocol: TCP, port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pagamentos
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: pagamentos }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: pedidos } }
+      ports: [{ protocol: TCP, port: 3002 }]
+  egress:
+    - to:   # integração com o gateway de pagamento externo (HTTPS)
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports: [{ protocol: TCP, port: 443 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: loja-veloz
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: pedidos } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: estoque } }
+      ports: [{ protocol: TCP, port: 5432 }]
