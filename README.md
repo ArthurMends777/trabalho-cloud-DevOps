@@ -5,7 +5,7 @@ com Docker Compose, imagens enxutas e versionadas, Kubernetes com práticas de p
 observabilidade (métricas, logs e traces) e infraestrutura reproduzível com Terraform.
 
 > 🎥 **Vídeo pitch (YouTube):**
-
+https://www.youtube.com/watch?v=u9OcHa5XY_Q
 ---
 
 ## 1. Arquitetura
